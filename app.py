@@ -6,7 +6,6 @@ import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import traceback
-import math
 
 app = Flask(__name__)
 
@@ -41,9 +40,9 @@ def create_signature(service_name, request_time, encrypted_data):
     md5_hash = hashlib.md5(raw_string.encode('utf-8')).hexdigest()
     return md5_hash
 
-# --- Rota Avançada: Buscar todos os planos ativos e seus consumos por ICCID ---
-@app.route('/get_usage_by_iccid', methods=['POST'])
-def get_usage_by_iccid():
+# --- Rota para Buscar Histórico Completo e Consumo Atual por ICCID ---
+@app.route('/get_iccid_history', methods=['POST'])
+def get_iccid_history():
     try:
         request_body = request.get_json()
         if not request_body:
@@ -53,10 +52,11 @@ def get_usage_by_iccid():
         if not iccid:
             return jsonify({"error": "Missing required field: iccid"}), 400
 
-        # 1. BUSCAR TODOS OS PEDIDOS ATIVOS PARA ESTE ICCID
+        # 1. BUSCAR TODOS OS PEDIDOS (de todos os status) PARA ESTE ICCID
         service_name_orders = "queryEsimOrderList"
         endpoint_orders = "saleOrderApi/queryEsimOrderList"
-        data_payload_orders = { "page": 1, "pageSize": 100, "iccid": iccid, "orderStatus": "INUSE", "lang": "en" }
+        # Deixamos 'orderStatus' em branco para pegar todos
+        data_payload_orders = { "page": 1, "pageSize": 100, "iccid": iccid, "orderStatus": "", "lang": "en" }
         
         data_str = json.dumps(data_payload_orders)
         encrypted_data = aes_encrypt(data_str)
@@ -70,52 +70,70 @@ def get_usage_by_iccid():
         response_orders_json = response_orders.json()
 
         if response_orders_json.get("code") != "0000":
-            return jsonify({"error": "Failed to fetch active orders for ICCID", "details": response_orders_json}), 400
+            return jsonify({"error": "Failed to fetch orders for ICCID", "details": response_orders_json}), 400
 
-        # ******** CORREÇÃO APLICADA AQUI ********
-        # A resposta descriptografada já é a lista de pedidos, não um objeto contendo a lista.
-        active_orders = json.loads(aes_decrypt(response_orders_json["data"]))
+        all_orders = json.loads(aes_decrypt(response_orders_json["data"]))
         
-        if not active_orders:
+        if not all_orders:
             return jsonify([]), 200
 
-        # 2. PARA CADA PEDIDO ATIVO, BUSCAR O CONSUMO
-        usage_results = []
-        service_name_flow = "getEsimFlowByParams"
-        endpoint_flow = "saleSimApi/getEsimFlowByParams"
-
-        for order in active_orders:
+        detailed_results = []
+        
+        # 2. PARA CADA PEDIDO ENCONTRADO, VERIFICAR O STATUS
+        for order in all_orders:
+            order_status = order.get("orderStatus")
             order_no = order.get("orderNo")
-            data_payload_flow = { "iccid": iccid, "orderNo": order_no, "lang": "en" }
             
-            data_str_flow = json.dumps(data_payload_flow)
-            encrypted_data_flow = aes_encrypt(data_str_flow)
-            request_time_flow = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-            sign_flow = create_signature(service_name_flow, request_time_flow, encrypted_data_flow)
-            final_payload_flow = { "accountId": ACCOUNT_ID, "serviceName": service_name_flow, "requestTime": request_time_flow, "data": encrypted_data_flow, "version": API_VERSION, "sign": sign_flow }
+            # 3. SE O PEDIDO ESTIVER "EM USO", BUSCAR O CONSUMO ATUAL
+            if order_status == "INUSE":
+                service_name_flow = "getEsimFlowByParams"
+                endpoint_flow = "saleSimApi/getEsimFlowByParams"
+                data_payload_flow = { "iccid": iccid, "orderNo": order_no, "lang": "en" }
+                
+                data_str_flow = json.dumps(data_payload_flow)
+                encrypted_data_flow = aes_encrypt(data_str_flow)
+                request_time_flow = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                sign_flow = create_signature(service_name_flow, request_time_flow, encrypted_data_flow)
+                final_payload_flow = { "accountId": ACCOUNT_ID, "serviceName": service_name_flow, "requestTime": request_time_flow, "data": encrypted_data_flow, "version": API_VERSION, "sign": sign_flow }
 
-            response_flow = requests.post(BASE_URL + endpoint_flow, data=json.dumps(final_payload_flow), headers=headers, timeout=20)
-            
-            usage_data = {}
-            if response_flow.status_code == 200 and response_flow.json().get("code") == "0000":
-                usage_data = json.loads(aes_decrypt(response_flow.json()["data"]))
+                response_flow = requests.post(BASE_URL + endpoint_flow, data=json.dumps(final_payload_flow), headers=headers, timeout=20)
+                
+                usage_data = {}
+                if response_flow.status_code == 200 and response_flow.json().get("code") == "0000":
+                    usage_data = json.loads(aes_decrypt(response_flow.json()["data"]))
+                
+                # Monta o resultado detalhado com consumo
+                combined_result = {
+                    "iccid": iccid,
+                    "orderNo": order_no,
+                    "productName": order.get("productName"),
+                    "status": order_status,
+                    "validity_start_date": order.get("startDate"),
+                    "validity_end_date": order.get("endDate"),
+                    "daily_total_mb": usage_data.get("dataTotal"),
+                    "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage"),
+                    "daily_remaining_mb": usage_data.get("dataResidual")
+                }
+                detailed_results.append(combined_result)
+            else:
+                # Monta o resultado detalhado SEM consumo para planos não ativos
+                combined_result = {
+                    "iccid": iccid,
+                    "orderNo": order_no,
+                    "productName": order.get("productName"),
+                    "status": order_status,
+                    "validity_start_date": order.get("startDate"),
+                    "validity_end_date": order.get("endDate"),
+                    "daily_total_mb": "N/A",
+                    "daily_usage_mb": "N/A",
+                    "daily_remaining_mb": "N/A"
+                }
+                detailed_results.append(combined_result)
 
-            # 3. COMBINAR AS INFORMAÇÕES
-            combined_result = {
-                "iccid": iccid,
-                "orderNo": order_no,
-                "productName": order.get("productName"),
-                "orderStatus": order.get("orderStatus"),
-                "daily_total_mb": usage_data.get("dataTotal"),
-                "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage"),
-                "daily_remaining_mb": usage_data.get("dataResidual")
-            }
-            usage_results.append(combined_result)
-
-        return jsonify(usage_results), 200
+        return jsonify(detailed_results), 200
 
     except Exception as e:
-        print("!!!!!!!!!! ERRO DETALHADO EM /get_usage_by_iccid !!!!!!!!!!")
+        print("!!!!!!!!!! ERRO DETALHADO EM /get_iccid_history !!!!!!!!!!")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
