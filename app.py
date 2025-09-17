@@ -41,7 +41,7 @@ def create_signature(service_name, request_time, encrypted_data):
     md5_hash = hashlib.md5(raw_string.encode('utf-8')).hexdigest()
     return md5_hash
 
-# --- Rota para Buscar todos os planos ativos e seus consumos por ICCID ---
+# --- Rota Avançada: Buscar todos os planos ativos e seus consumos por ICCID ---
 @app.route('/get_usage_by_iccid', methods=['POST'])
 def get_usage_by_iccid():
     try:
@@ -72,10 +72,12 @@ def get_usage_by_iccid():
         if response_orders_json.get("code") != "0000":
             return jsonify({"error": "Failed to fetch active orders for ICCID", "details": response_orders_json}), 400
 
-        active_orders = json.loads(aes_decrypt(response_orders_json["data"])).get("data", [])
+        # ******** CORREÇÃO APLICADA AQUI ********
+        # A resposta descriptografada já é a lista de pedidos, não um objeto contendo a lista.
+        active_orders = json.loads(aes_decrypt(response_orders_json["data"]))
         
         if not active_orders:
-            return jsonify([]), 200 # Retorna uma lista vazia se não houver planos ativos
+            return jsonify([]), 200
 
         # 2. PARA CADA PEDIDO ATIVO, BUSCAR O CONSUMO
         usage_results = []
@@ -102,11 +104,11 @@ def get_usage_by_iccid():
             combined_result = {
                 "iccid": iccid,
                 "orderNo": order_no,
-                "productName": order.get("productName"), # Contém o país/região
+                "productName": order.get("productName"),
                 "orderStatus": order.get("orderStatus"),
-                "daily_total_mb": usage_data.get("dataTotal"), # Consumo do ciclo/dia em MB
-                "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage"), # Prioriza 'qtaconsumption' se existir, em MB
-                "daily_remaining_mb": usage_data.get("dataResidual") # Restante no ciclo/dia em MB
+                "daily_total_mb": usage_data.get("dataTotal"),
+                "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage"),
+                "daily_remaining_mb": usage_data.get("dataResidual")
             }
             usage_results.append(combined_result)
 
