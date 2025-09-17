@@ -14,7 +14,7 @@ app = Flask(__name__)
 ACCOUNT_ID = "RE_simpremium"
 SIGN_KEY = "3GIJ0119BNP3G6UN6A5I6BB4PZS2QVWQ"
 SECRET_KEY = "UYHUR49SEVWFR6WI"
-VECTOR = "0Q75CK0MYKQDKC0O"
+VECTOR = "OQ75CK0MYKQDKC0O"
 API_VERSION = "1.0"
 BASE_URL = "http://enterpriseapi.tugegroup.com:8060/api-publicappmodule/"
 
