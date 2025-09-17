@@ -6,6 +6,7 @@ import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import traceback
+import math
 
 app = Flask(__name__)
 
@@ -13,7 +14,7 @@ app = Flask(__name__)
 ACCOUNT_ID = "RE_simpremium"
 SIGN_KEY = "3GIJ0119BNP3G6UN6A5I6BB4PZS2QVWQ"
 SECRET_KEY = "UYHUR49SEVWFR6WI"
-VECTOR = "OQ75CK0MYKQDKC0O"
+VECTOR = "0Q75CK0MYKQDKC0O"
 API_VERSION = "1.0"
 BASE_URL = "http://enterpriseapi.tugegroup.com:8060/api-publicappmodule/"
 
@@ -40,50 +41,79 @@ def create_signature(service_name, request_time, encrypted_data):
     md5_hash = hashlib.md5(raw_string.encode('utf-8')).hexdigest()
     return md5_hash
 
-# --- Rota para Consultar Consumo de um Único eSIM ---
-@app.route('/get_usage', methods=['POST'])
-def get_esim_usage():
+# --- Rota para Buscar todos os planos ativos e seus consumos por ICCID ---
+@app.route('/get_usage_by_iccid', methods=['POST'])
+def get_usage_by_iccid():
     try:
         request_body = request.get_json()
         if not request_body:
             return jsonify({"error": "Request body is missing or not JSON"}), 400
         
         iccid = request_body.get("iccid")
-        order_no = request_body.get("orderNo")
+        if not iccid:
+            return jsonify({"error": "Missing required field: iccid"}), 400
 
-        if not iccid or not order_no:
-            return jsonify({"error": "Missing required fields: iccid and orderNo"}), 400
-            
-        service_name = "getEsimFlowByParams"
-        endpoint = "saleSimApi/getEsimFlowByParams"
+        # 1. BUSCAR TODOS OS PEDIDOS ATIVOS PARA ESTE ICCID
+        service_name_orders = "queryEsimOrderList"
+        endpoint_orders = "saleOrderApi/queryEsimOrderList"
+        data_payload_orders = { "page": 1, "pageSize": 100, "iccid": iccid, "orderStatus": "INUSE", "lang": "en" }
         
-        data_payload = {
-            "iccid": iccid,
-            "orderNo": order_no,
-            "lang": request_body.get("lang", "en")
-        }
-
-        data_str = json.dumps(data_payload)
+        data_str = json.dumps(data_payload_orders)
         encrypted_data = aes_encrypt(data_str)
         request_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        sign = create_signature(service_name, request_time, encrypted_data)
-
-        final_payload = { "accountId": ACCOUNT_ID, "serviceName": service_name, "requestTime": request_time, "data": encrypted_data, "version": API_VERSION, "sign": sign }
+        sign = create_signature(service_name_orders, request_time, encrypted_data)
+        final_payload = { "accountId": ACCOUNT_ID, "serviceName": service_name_orders, "requestTime": request_time, "data": encrypted_data, "version": API_VERSION, "sign": sign }
         headers = {'Content-Type': 'application/json'}
 
-        response = requests.post(BASE_URL + endpoint, data=json.dumps(final_payload), headers=headers, timeout=20)
-        response.raise_for_status()
-        
-        response_json = response.json()
+        response_orders = requests.post(BASE_URL + endpoint_orders, data=json.dumps(final_payload), headers=headers, timeout=20)
+        response_orders.raise_for_status()
+        response_orders_json = response_orders.json()
 
-        if response_json.get("code") == "0000":
-            decrypted_data = aes_decrypt(response_json["data"])
-            return jsonify(json.loads(decrypted_data)), 200
-        else:
-            return jsonify({"error": response_json}), 400
+        if response_orders_json.get("code") != "0000":
+            return jsonify({"error": "Failed to fetch active orders for ICCID", "details": response_orders_json}), 400
+
+        active_orders = json.loads(aes_decrypt(response_orders_json["data"])).get("data", [])
+        
+        if not active_orders:
+            return jsonify([]), 200 # Retorna uma lista vazia se não houver planos ativos
+
+        # 2. PARA CADA PEDIDO ATIVO, BUSCAR O CONSUMO
+        usage_results = []
+        service_name_flow = "getEsimFlowByParams"
+        endpoint_flow = "saleSimApi/getEsimFlowByParams"
+
+        for order in active_orders:
+            order_no = order.get("orderNo")
+            data_payload_flow = { "iccid": iccid, "orderNo": order_no, "lang": "en" }
+            
+            data_str_flow = json.dumps(data_payload_flow)
+            encrypted_data_flow = aes_encrypt(data_str_flow)
+            request_time_flow = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            sign_flow = create_signature(service_name_flow, request_time_flow, encrypted_data_flow)
+            final_payload_flow = { "accountId": ACCOUNT_ID, "serviceName": service_name_flow, "requestTime": request_time_flow, "data": encrypted_data_flow, "version": API_VERSION, "sign": sign_flow }
+
+            response_flow = requests.post(BASE_URL + endpoint_flow, data=json.dumps(final_payload_flow), headers=headers, timeout=20)
+            
+            usage_data = {}
+            if response_flow.status_code == 200 and response_flow.json().get("code") == "0000":
+                usage_data = json.loads(aes_decrypt(response_flow.json()["data"]))
+
+            # 3. COMBINAR AS INFORMAÇÕES
+            combined_result = {
+                "iccid": iccid,
+                "orderNo": order_no,
+                "productName": order.get("productName"), # Contém o país/região
+                "orderStatus": order.get("orderStatus"),
+                "daily_total_mb": usage_data.get("dataTotal"), # Consumo do ciclo/dia em MB
+                "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage"), # Prioriza 'qtaconsumption' se existir, em MB
+                "daily_remaining_mb": usage_data.get("dataResidual") # Restante no ciclo/dia em MB
+            }
+            usage_results.append(combined_result)
+
+        return jsonify(usage_results), 200
 
     except Exception as e:
-        print("!!!!!!!!!! ERRO DETALHADO EM /get_usage !!!!!!!!!!")
+        print("!!!!!!!!!! ERRO DETALHADO EM /get_usage_by_iccid !!!!!!!!!!")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
