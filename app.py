@@ -6,6 +6,7 @@ import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import traceback
+import pytz # Biblioteca para fusos horários
 
 app = Flask(__name__)
 
@@ -44,6 +45,12 @@ def create_signature(service_name, request_time, encrypted_data):
 @app.route('/get_iccid_history', methods=['POST'])
 def get_iccid_history():
     try:
+        # Define o fuso horário de São Paulo
+        sao_paulo_tz = pytz.timezone("America/Sao_Paulo")
+        
+        # Gera a data e hora da consulta já no fuso correto
+        query_datetime_sp = datetime.now(sao_paulo_tz).strftime('%Y-%m-%d %H:%M:%S')
+
         request_body = request.get_json()
         if not request_body:
             return jsonify({"error": "Request body is missing or not JSON"}), 400
@@ -52,10 +59,9 @@ def get_iccid_history():
         if not iccid:
             return jsonify({"error": "Missing required field: iccid"}), 400
 
-        # 1. BUSCAR TODOS OS PEDIDOS (de todos os status) PARA ESTE ICCID
+        # 1. BUSCAR TODOS OS PEDIDOS
         service_name_orders = "queryEsimOrderList"
         endpoint_orders = "saleOrderApi/queryEsimOrderList"
-        # Deixamos 'orderStatus' em branco para pegar todos
         data_payload_orders = { "page": 1, "pageSize": 100, "iccid": iccid, "orderStatus": "", "lang": "en" }
         
         data_str = json.dumps(data_payload_orders)
@@ -79,13 +85,32 @@ def get_iccid_history():
 
         detailed_results = []
         
-        # 2. PARA CADA PEDIDO ENCONTRADO, VERIFICAR O STATUS
         for order in all_orders:
             order_status = order.get("orderStatus")
             order_no = order.get("orderNo")
             
-            # 3. SE O PEDIDO ESTIVER "EM USO", BUSCAR O CONSUMO ATUAL
+            # Conversão das datas de início e fim para o fuso de São Paulo
+            start_date_sp = ""
+            end_date_sp = ""
+            try:
+                # API retorna datas em GMT (UTC)
+                utc_tz = pytz.utc
+                date_format = '%Y-%m-%d %H:%M:%S'
+                
+                if order.get("startDate"):
+                    start_date_utc = datetime.strptime(order.get("startDate"), date_format).replace(tzinfo=utc_tz)
+                    start_date_sp = start_date_utc.astimezone(sao_paulo_tz).strftime(date_format)
+
+                if order.get("endDate"):
+                    end_date_utc = datetime.strptime(order.get("endDate"), date_format).replace(tzinfo=utc_tz)
+                    end_date_sp = end_date_utc.astimezone(sao_paulo_tz).strftime(date_format)
+            except (ValueError, TypeError):
+                # Se a data estiver vazia ou em formato incorreto, ignora a conversão
+                pass
+
+            usage_data = {}
             if order_status == "INUSE":
+                # Busca o consumo apenas para planos ativos
                 service_name_flow = "getEsimFlowByParams"
                 endpoint_flow = "saleSimApi/getEsimFlowByParams"
                 data_payload_flow = { "iccid": iccid, "orderNo": order_no, "lang": "en" }
@@ -98,37 +123,23 @@ def get_iccid_history():
 
                 response_flow = requests.post(BASE_URL + endpoint_flow, data=json.dumps(final_payload_flow), headers=headers, timeout=20)
                 
-                usage_data = {}
                 if response_flow.status_code == 200 and response_flow.json().get("code") == "0000":
                     usage_data = json.loads(aes_decrypt(response_flow.json()["data"]))
-                
-                # Monta o resultado detalhado com consumo
-                combined_result = {
-                    "iccid": iccid,
-                    "orderNo": order_no,
-                    "productName": order.get("productName"),
-                    "status": order_status,
-                    "validity_start_date": order.get("startDate"),
-                    "validity_end_date": order.get("endDate"),
-                    "daily_total_mb": usage_data.get("dataTotal"),
-                    "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage"),
-                    "daily_remaining_mb": usage_data.get("dataResidual")
-                }
-                detailed_results.append(combined_result)
-            else:
-                # Monta o resultado detalhado SEM consumo para planos não ativos
-                combined_result = {
-                    "iccid": iccid,
-                    "orderNo": order_no,
-                    "productName": order.get("productName"),
-                    "status": order_status,
-                    "validity_start_date": order.get("startDate"),
-                    "validity_end_date": order.get("endDate"),
-                    "daily_total_mb": "N/A",
-                    "daily_usage_mb": "N/A",
-                    "daily_remaining_mb": "N/A"
-                }
-                detailed_results.append(combined_result)
+
+            # Monta o resultado detalhado com as novas informações
+            combined_result = {
+                "data_consulta_sp": query_datetime_sp,
+                "iccid": iccid,
+                "orderNo": order_no,
+                "productName": order.get("productName"),
+                "status": order_status,
+                "validity_start_date_sp": start_date_sp,
+                "validity_end_date_sp": end_date_sp,
+                "daily_total_mb": usage_data.get("dataTotal", "N/A"),
+                "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage") or "N/A",
+                "daily_remaining_mb": usage_data.get("dataResidual", "N/A")
+            }
+            detailed_results.append(combined_result)
 
         return jsonify(detailed_results), 200
 
