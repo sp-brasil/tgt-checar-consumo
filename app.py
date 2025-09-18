@@ -18,7 +18,7 @@ VECTOR = "OQ75CK0MYKQDKC0O"
 API_VERSION = "1.0"
 BASE_URL = "http://enterpriseapi.tugegroup.com:8060/api-publicappmodule/"
 
-# --- Funções de Criptografia e Assinatura (sem alterações) ---
+# --- Funções de Criptografia e Assinatura ---
 def aes_encrypt(data_str):
     key = SECRET_KEY.encode('utf-8')
     iv = VECTOR.encode('utf-8')
@@ -61,14 +61,14 @@ def get_full_iccid_details():
         endpoint_orders = "saleOrderApi/queryEsimOrderList"
         data_payload_orders = { "page": 1, "pageSize": 100, "iccid": iccid, "orderStatus": "", "lang": "en" }
         
-        data_str = json.dumps(data_payload_orders)
-        encrypted_data = aes_encrypt(data_str)
-        request_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        sign = create_signature(service_name_orders, request_time, encrypted_data)
-        final_payload = { "accountId": ACCOUNT_ID, "serviceName": service_name_orders, "requestTime": request_time, "data": encrypted_data, "version": API_VERSION, "sign": sign }
+        data_str_orders = json.dumps(data_payload_orders)
+        encrypted_data_orders = aes_encrypt(data_str_orders)
+        request_time_orders = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        sign_orders = create_signature(service_name_orders, request_time_orders, encrypted_data_orders)
+        final_payload_orders = { "accountId": ACCOUNT_ID, "serviceName": service_name_orders, "requestTime": request_time_orders, "data": encrypted_data_orders, "version": API_VERSION, "sign": sign_orders }
         headers = {'Content-Type': 'application/json'}
 
-        response_orders = requests.post(BASE_URL + endpoint_orders, data=json.dumps(final_payload), headers=headers, timeout=20)
+        response_orders = requests.post(BASE_URL + endpoint_orders, data=json.dumps(final_payload_orders), headers=headers, timeout=20)
         response_orders.raise_for_status()
         response_orders_json = response_orders.json()
 
@@ -113,9 +113,20 @@ def get_full_iccid_details():
 
             usage_data = {}
             if order_status == "INUSE":
-                # Busca consumo apenas para o plano ativo
-                # (Lógica omitida para brevidade, mas igual à anterior)
-                pass # A lógica de busca de consumo estaria aqui se necessária
+                service_name_flow = "getEsimFlowByParams"
+                endpoint_flow = "saleSimApi/getEsimFlowByParams"
+                data_payload_flow = { "iccid": iccid, "orderNo": order_no, "lang": "en" }
+                
+                data_str_flow = json.dumps(data_payload_flow)
+                encrypted_data_flow = aes_encrypt(data_str_flow)
+                request_time_flow = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                sign_flow = create_signature(service_name_flow, request_time_flow, encrypted_data_flow)
+                final_payload_flow = { "accountId": ACCOUNT_ID, "serviceName": service_name_flow, "requestTime": request_time_flow, "data": encrypted_data_flow, "version": API_VERSION, "sign": sign_flow }
+
+                response_flow = requests.post(BASE_URL + endpoint_flow, data=json.dumps(final_payload_flow), headers=headers, timeout=20)
+                
+                if response_flow.status_code == 200 and response_flow.json().get("code") == "0000":
+                    usage_data = json.loads(aes_decrypt(response_flow.json()["data"]))
 
             # Monta o resultado final combinando tudo
             combined_result = {
@@ -130,7 +141,10 @@ def get_full_iccid_details():
                 "productName": order.get("productName"),
                 "orderStatus": order_status,
                 "validity_start_date_sp": start_date_sp,
-                "validity_end_date_sp": end_date_sp
+                "validity_end_date_sp": end_date_sp,
+                "daily_total_mb": usage_data.get("dataTotal", "N/A"),
+                "daily_usage_mb": usage_data.get("qtaconsumption") or usage_data.get("dataUsage") or "N/A",
+                "daily_remaining_mb": usage_data.get("dataResidual", "N/A")
             }
             detailed_results.append(combined_result)
 
